@@ -1,6 +1,15 @@
 """llm-reliability: calibration, drift detection, and adversarial robustness for LLMs."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
+
+from llm_reliability.adversarial import (
+    PerturbedPrompt,
+    ConsistencyResult,
+    AdversarialResult,
+    perturb,
+    consistency_score,
+    contradiction_probe,
+)
 
 from llm_reliability.drift import (
     DriftSnapshot,
@@ -39,6 +48,12 @@ from llm_reliability.calibration import (
 )
 
 __all__ = [
+    "PerturbedPrompt",
+    "ConsistencyResult",
+    "AdversarialResult",
+    "perturb",
+    "consistency_score",
+    "contradiction_probe",
     "DriftSnapshot",
     "DriftTest",
     "DriftResult",
