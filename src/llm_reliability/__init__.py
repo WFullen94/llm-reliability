@@ -13,6 +13,10 @@ from llm_reliability.calibration import (
     temperature_scale,
     apply_temperature,
     conformal_threshold,
+    semantic_entropy,
+    semantic_dispersion,
+    consistency,
+    p_true,
 )
 
 __all__ = [
@@ -26,4 +30,8 @@ __all__ = [
     "temperature_scale",
     "apply_temperature",
     "conformal_threshold",
+    "semantic_entropy",
+    "semantic_dispersion",
+    "consistency",
+    "p_true",
 ]

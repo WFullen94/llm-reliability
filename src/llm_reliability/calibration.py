@@ -29,6 +29,9 @@ class CalibrationResult:
     n_samples: int
     n_bins: int
     bins: list[BinStats] = field(default_factory=list)
+    # Per-question (correct, confidence) pairs — None for legacy callers that don't need it.
+    # Stored here for cross-method comparison (Research Idea 4: method ranking consistency).
+    raw_scores: list[tuple[int, float]] | None = None
 
     def summary(self) -> str:
         lines = [
@@ -99,15 +102,22 @@ def calibration_result(
     y_true: Sequence[int | bool],
     confidences: Sequence[float],
     n_bins: int = 10,
+    store_raw: bool = False,
 ) -> CalibrationResult:
-    """Compute ECE, MCE, and per-bin stats in a single pass."""
+    """Compute ECE, MCE, and per-bin stats in a single pass.
+
+    Args:
+        store_raw: If True, attach raw (correct, confidence) pairs to the result.
+                   Needed for cross-method comparison (Research Idea 4).
+    """
     y = np.asarray(y_true, dtype=float)
     c = np.asarray(confidences, dtype=float)
     bins = _bin_stats(y, c, n_bins)
     n = len(y)
     ece_val = float(sum(b.count / n * abs(b.accuracy - b.mean_confidence) for b in bins))
     mce_val = float(max((abs(b.accuracy - b.mean_confidence) for b in bins), default=0.0))
-    return CalibrationResult(ece=ece_val, mce=mce_val, n_samples=n, n_bins=n_bins, bins=bins)
+    raw = list(zip(y_true, confidences)) if store_raw else None
+    return CalibrationResult(ece=ece_val, mce=mce_val, n_samples=n, n_bins=n_bins, bins=bins, raw_scores=raw)
 
 
 # ---------------------------------------------------------------------------
@@ -313,3 +323,242 @@ def conformal_threshold(
     level = np.ceil((n + 1) * (1 - alpha)) / n
     level = min(level, 1.0)
     return float(np.quantile(scores, level))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Black-box calibration (no logits required)
+# ---------------------------------------------------------------------------
+
+def _load_embedder(model_name: str = "all-MiniLM-L6-v2"):
+    """Lazy-load a sentence-transformers model."""
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        raise ImportError(
+            "pip install sentence-transformers to use embedding-based calibration methods"
+        )
+    return SentenceTransformer(model_name)
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10))
+
+
+def _default_match(pred: str, label: str) -> bool:
+    return label.lower() in pred.lower() or pred.lower() in label.lower()
+
+
+def _majority_answer(answers: list[str]) -> str:
+    counts: dict[str, int] = {}
+    for a in answers:
+        counts[a] = counts.get(a, 0) + 1
+    return max(counts, key=lambda k: counts[k])
+
+
+def semantic_entropy(
+    model_fn: Callable[[str], str],
+    questions: list[str],
+    labels: list[str],
+    n_samples: int = 10,
+    similarity_threshold: float = 0.85,
+    embedder_model: str = "all-MiniLM-L6-v2",
+    n_bins: int = 10,
+    match_fn: Callable[[str, str], bool] | None = None,
+) -> CalibrationResult:
+    """Calibration via semantic entropy (Kuhn et al. 2023, arxiv:2302.09664).
+
+    Samples N responses per question, embeds them, clusters by semantic
+    equivalence, and uses entropy over clusters as uncertainty. Low entropy
+    (all responses in one cluster) → high confidence.
+
+    NOTE: model_fn should produce stochastic outputs (temperature > 0).
+    Total API calls = len(questions) * n_samples.
+
+    Args:
+        n_samples: Responses to sample per question.
+        similarity_threshold: Cosine similarity cutoff for semantic equivalence.
+        embedder_model: sentence-transformers model for embedding responses.
+    """
+    if len(questions) != len(labels):
+        raise ValueError("questions and labels must have the same length")
+    if match_fn is None:
+        match_fn = _default_match
+
+    embedder = _load_embedder(embedder_model)
+    y_true: list[int] = []
+    confs: list[float] = []
+
+    for question, label in zip(questions, labels):
+        responses = [model_fn(question) for _ in range(n_samples)]
+        embeddings = embedder.encode(responses, normalize_embeddings=True)
+
+        # Greedy clustering: assign each response to first cluster with sim > threshold
+        clusters: list[list[int]] = []
+        cluster_labels: list[str] = []
+        for i, emb in enumerate(embeddings):
+            assigned = False
+            for j, cluster in enumerate(clusters):
+                rep = embeddings[cluster[0]]
+                if _cosine_similarity(emb, rep) >= similarity_threshold:
+                    cluster.append(i)
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append([i])
+                cluster_labels.append(responses[i])
+
+        # Entropy over cluster sizes
+        cluster_probs = np.array([len(c) / n_samples for c in clusters])
+        entropy = float(-np.sum(cluster_probs * np.log(cluster_probs + 1e-10)))
+        max_entropy = np.log(n_samples)
+        confidence = 1.0 - (entropy / max_entropy) if max_entropy > 0 else 1.0
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+
+        # Majority cluster's representative answer
+        largest_cluster_idx = int(np.argmax([len(c) for c in clusters]))
+        majority_answer = cluster_labels[largest_cluster_idx]
+        correct = int(match_fn(majority_answer, label))
+
+        y_true.append(correct)
+        confs.append(confidence)
+
+    return calibration_result(y_true, confs, n_bins, store_raw=True)
+
+
+def semantic_dispersion(
+    model_fn: Callable[[str], str],
+    questions: list[str],
+    labels: list[str],
+    n_samples: int = 10,
+    embedder_model: str = "all-MiniLM-L6-v2",
+    n_bins: int = 10,
+    match_fn: Callable[[str, str], bool] | None = None,
+) -> CalibrationResult:
+    """Calibration via semantic dispersion (Lin et al. 2024, arxiv:2305.19187).
+
+    Simpler alternative to semantic entropy: confidence = mean pairwise cosine
+    similarity across N sampled responses. High similarity = low dispersion =
+    high confidence. No clustering required.
+
+    NOTE: model_fn should produce stochastic outputs (temperature > 0).
+    Total API calls = len(questions) * n_samples.
+    """
+    if len(questions) != len(labels):
+        raise ValueError("questions and labels must have the same length")
+    if match_fn is None:
+        match_fn = _default_match
+
+    embedder = _load_embedder(embedder_model)
+    y_true: list[int] = []
+    confs: list[float] = []
+
+    for question, label in zip(questions, labels):
+        responses = [model_fn(question) for _ in range(n_samples)]
+        embeddings = embedder.encode(responses, normalize_embeddings=True)
+
+        # Mean pairwise cosine similarity (normalized embeddings → dot product = cosine sim)
+        sim_matrix = embeddings @ embeddings.T
+        n = len(responses)
+        # Sum off-diagonal elements (exclude self-similarity)
+        total_sim = (sim_matrix.sum() - np.trace(sim_matrix)) / (n * (n - 1)) if n > 1 else 1.0
+        confidence = float(np.clip(total_sim, 0.0, 1.0))
+
+        majority = _majority_answer(responses)
+        correct = int(match_fn(majority, label))
+        y_true.append(correct)
+        confs.append(confidence)
+
+    return calibration_result(y_true, confs, n_bins, store_raw=True)
+
+
+def consistency(
+    model_fn: Callable[[str], str],
+    questions: list[str],
+    labels: list[str],
+    n_samples: int = 10,
+    n_bins: int = 10,
+    match_fn: Callable[[str, str], bool] | None = None,
+) -> CalibrationResult:
+    """Calibration via self-consistency (Manakul et al. 2023, SelfCheckGPT, arxiv:2303.08896).
+
+    Asks the same question N times. Confidence = fraction of responses agreeing
+    with the majority answer. No embeddings needed — text-only, works with any API.
+
+    NOTE: model_fn should produce stochastic outputs (temperature > 0).
+    Total API calls = len(questions) * n_samples.
+    """
+    if len(questions) != len(labels):
+        raise ValueError("questions and labels must have the same length")
+    if match_fn is None:
+        match_fn = _default_match
+
+    y_true: list[int] = []
+    confs: list[float] = []
+
+    for question, label in zip(questions, labels):
+        responses = [model_fn(question) for _ in range(n_samples)]
+        majority = _majority_answer(responses)
+        agreement = sum(1 for r in responses if r.strip() == majority.strip()) / n_samples
+        confidence = float(np.clip(agreement, 0.0, 1.0))
+        correct = int(match_fn(majority, label))
+        y_true.append(correct)
+        confs.append(confidence)
+
+    return calibration_result(y_true, confs, n_bins, store_raw=True)
+
+
+_P_TRUE_TEMPLATE = """\
+Question: {question}
+
+Proposed answer: {answer}
+
+Is the proposed answer correct? Reply with only Yes or No."""
+
+
+def p_true(
+    model_fn: Callable[[str], str],
+    questions: list[str],
+    labels: list[str],
+    n_samples: int = 5,
+    answer_template: str = "Answer the following question in one sentence.\n\nQuestion: {question}",
+    n_bins: int = 10,
+    match_fn: Callable[[str, str], bool] | None = None,
+) -> CalibrationResult:
+    """Calibration via P(True) (Kadavath et al. 2022, arxiv:2207.05221).
+
+    Two-step per question:
+      1. Generate an answer with model_fn.
+      2. Ask the model N times: "Is this answer correct? Yes or No?"
+         Confidence = fraction of Yes responses.
+
+    Works with any text-only API. More expensive than consistency() but
+    targets a different signal: the model's self-assessment of a specific answer
+    rather than its agreement across independent samples.
+
+    Total API calls = len(questions) * (1 + n_samples).
+    """
+    if len(questions) != len(labels):
+        raise ValueError("questions and labels must have the same length")
+    if match_fn is None:
+        match_fn = _default_match
+
+    y_true: list[int] = []
+    confs: list[float] = []
+
+    for question, label in zip(questions, labels):
+        answer_prompt = answer_template.format(question=question)
+        answer = model_fn(answer_prompt).strip()
+
+        verification_prompt = _P_TRUE_TEMPLATE.format(question=question, answer=answer)
+        yes_count = 0
+        for _ in range(n_samples):
+            verdict = model_fn(verification_prompt).strip().lower()
+            if verdict.startswith("yes"):
+                yes_count += 1
+
+        confidence = float(yes_count / n_samples)
+        correct = int(match_fn(answer, label))
+        y_true.append(correct)
+        confs.append(confidence)
+
+    return calibration_result(y_true, confs, n_bins, store_raw=True)
