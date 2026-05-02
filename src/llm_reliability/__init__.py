@@ -1,6 +1,16 @@
 """llm-reliability: calibration, drift detection, and adversarial robustness for LLMs."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
+from llm_reliability.adapters import (
+    ModelResponse,
+    ModelAdapter,
+    OpenAIAdapter,
+    AnthropicAdapter,
+    OllamaAdapter,
+    MLXAdapter,
+    HuggingFaceAdapter,
+)
 
 from llm_reliability.calibration import (
     CalibrationResult,
@@ -20,6 +30,13 @@ from llm_reliability.calibration import (
 )
 
 __all__ = [
+    "ModelResponse",
+    "ModelAdapter",
+    "OpenAIAdapter",
+    "AnthropicAdapter",
+    "OllamaAdapter",
+    "MLXAdapter",
+    "HuggingFaceAdapter",
     "CalibrationResult",
     "BinStats",
     "calibration_result",
