@@ -1,6 +1,15 @@
 """llm-reliability: calibration, drift detection, and adversarial robustness for LLMs."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
+
+from llm_reliability.drift import (
+    DriftSnapshot,
+    DriftTest,
+    DriftResult,
+    ChangedExample,
+    capture,
+    compare,
+)
 
 from llm_reliability.adapters import (
     ModelResponse,
@@ -30,6 +39,12 @@ from llm_reliability.calibration import (
 )
 
 __all__ = [
+    "DriftSnapshot",
+    "DriftTest",
+    "DriftResult",
+    "ChangedExample",
+    "capture",
+    "compare",
     "ModelResponse",
     "ModelAdapter",
     "OpenAIAdapter",
