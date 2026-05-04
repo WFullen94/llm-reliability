@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-reliability"
-version = "0.0.1"
+version = "0.6.0"
 description = "Calibration, drift detection, and adversarial robustness for LLMs in production"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,3 +25,9 @@ llm-reliability = "llm_reliability.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["llm_reliability"]

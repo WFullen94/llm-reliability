@@ -122,6 +122,138 @@ def _print_bin_table(result) -> None:
 # temperature-scale command
 # ---------------------------------------------------------------------------
 
+@main.command("audit")
+@click.argument("prompts_file", type=click.Path(exists=True))
+@click.option("--labels", "labels_file", type=click.Path(exists=True), default=None,
+              help="JSON file with list of ground-truth answer strings.")
+@click.option("--provider", default="openai", show_default=True,
+              type=click.Choice(["openai", "anthropic", "ollama"]),
+              help="Which model provider to use.")
+@click.option("--model", default=None, help="Model name (default: gpt-4o-mini / claude-haiku-4-5-20251001 / llama3).")
+@click.option("--baseline", "baseline_path", type=click.Path(exists=True), default=None,
+              help="Path to a saved DriftSnapshot JSON for drift comparison.")
+@click.option("--no-calibration", is_flag=True, help="Skip calibration module.")
+@click.option("--no-adversarial", is_flag=True, help="Skip adversarial module.")
+@click.option("--no-drift", is_flag=True, help="Skip drift module.")
+@click.option("--n-samples", default=5, show_default=True, help="Samples per question for calibration.")
+@click.option("--output", type=click.Path(), default=None, help="Save full audit result to JSON.")
+@click.option("--save-snapshot", type=click.Path(), default=None,
+              help="Save drift snapshot to this path after audit.")
+def audit_cmd(
+    prompts_file: str,
+    labels_file: str | None,
+    provider: str,
+    model: str | None,
+    baseline_path: str | None,
+    no_calibration: bool,
+    no_adversarial: bool,
+    no_drift: bool,
+    n_samples: int,
+    output: str | None,
+    save_snapshot: str | None,
+) -> None:
+    """Run a full reliability audit on a model.
+
+    PROMPTS_FILE must be a JSON array of prompt strings.
+
+    Examples:
+
+    \b
+      # Audit with OpenAI (requires OPENAI_API_KEY)
+      llm-reliability audit prompts.json --labels labels.json
+
+    \b
+      # Audit with Ollama (local model, no API key needed)
+      llm-reliability audit prompts.json --provider ollama --model llama3
+
+    \b
+      # Compare against a saved baseline snapshot
+      llm-reliability audit prompts.json --baseline snapshot.json
+    """
+    import os
+    from llm_reliability.report import audit
+    from llm_reliability.drift import DriftSnapshot
+
+    prompts = json.loads(Path(prompts_file).read_text())
+    if not isinstance(prompts, list):
+        click.echo("Error: prompts file must be a JSON array of strings.", err=True)
+        sys.exit(1)
+
+    labels = None
+    if labels_file:
+        labels = json.loads(Path(labels_file).read_text())
+
+    # Build adapter
+    if provider == "openai":
+        from llm_reliability.adapters import OpenAIAdapter
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            click.echo("Error: OPENAI_API_KEY not set.", err=True)
+            sys.exit(1)
+        adapter = OpenAIAdapter(model=model or "gpt-4o-mini", api_key=api_key)
+    elif provider == "anthropic":
+        from llm_reliability.adapters import AnthropicAdapter
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            click.echo("Error: ANTHROPIC_API_KEY not set.", err=True)
+            sys.exit(1)
+        adapter = AnthropicAdapter(model=model or "claude-haiku-4-5-20251001", api_key=api_key)
+    else:
+        from llm_reliability.adapters import OllamaAdapter
+        adapter = OllamaAdapter(model=model or "llama3")
+
+    baseline = None
+    if baseline_path:
+        baseline = DriftSnapshot.load(baseline_path)
+
+    console.print(f"[bold]Running reliability audit[/bold] ({len(prompts)} prompts, provider={provider})")
+
+    result = audit(
+        adapter,
+        prompts,
+        labels=labels,
+        baseline=baseline,
+        run_calibration=not no_calibration,
+        run_adversarial=not no_adversarial,
+        run_drift=not no_drift,
+        n_calibration_samples=n_samples,
+    )
+
+    console.print(result.report())
+
+    if save_snapshot and not no_drift:
+        from llm_reliability.drift import capture
+        snap = capture(adapter, prompts, embed=True, labels=labels)
+        snap.save(save_snapshot)
+        console.print(f"[green]Snapshot saved → {save_snapshot}[/green]")
+
+    if output:
+        import dataclasses
+        out = {
+            "passed": result.passed,
+            "n_prompts": result.n_prompts,
+            "warnings": result.warnings,
+            "calibration": {
+                "ece": result.calibration.ece,
+                "mce": result.calibration.mce,
+            } if result.calibration else None,
+            "adversarial": {
+                "overall_consistency": result.adversarial.overall_consistency,
+                "flip_rate": result.adversarial.flip_rate,
+                "semantic_stability_distance": result.adversarial.semantic_stability_distance,
+                "contradiction_rate": result.adversarial.contradiction_rate,
+            } if result.adversarial else None,
+            "drift": {
+                "any_significant": result.drift.any_significant,
+                "calibration_curve_distance": result.drift.calibration_curve_distance,
+            } if result.drift else None,
+        }
+        Path(output).write_text(json.dumps(out, indent=2))
+        console.print(f"[green]Audit result saved → {output}[/green]")
+
+    sys.exit(0 if result.passed else 1)
+
+
 @main.command("temperature-scale")
 @click.argument("logits_file", type=click.Path(exists=True))
 def temperature_scale_cmd(logits_file: str) -> None:

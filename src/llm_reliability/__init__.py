@@ -1,6 +1,6 @@
 """llm-reliability: calibration, drift detection, and adversarial robustness for LLMs."""
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 
 from llm_reliability.adversarial import (
     PerturbedPrompt,
@@ -30,6 +30,8 @@ from llm_reliability.adapters import (
     HuggingFaceAdapter,
 )
 
+from llm_reliability.report import AuditResult, audit
+
 from llm_reliability.calibration import (
     CalibrationResult,
     BinStats,
@@ -48,6 +50,8 @@ from llm_reliability.calibration import (
 )
 
 __all__ = [
+    "AuditResult",
+    "audit",
     "PerturbedPrompt",
     "ConsistencyResult",
     "AdversarialResult",
